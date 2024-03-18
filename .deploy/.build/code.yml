@@ -1,0 +1,96 @@
+version: 0.2
+env:
+  variables:
+    DOTNET_ROOT: /root/.dotnet
+
+phases:
+  install:
+    runtime-versions:
+      dotnet: 6.0
+    commands:
+      - apt-get update -y
+      - apt-get install -y apt-transport-https
+      # json parsing
+      - pip install jq
+      # install Cloudformation4dotNET tool
+      #- dotnet tool install NachoColl.Cloudformation4dotNET --version 7.1.* --tool-path $CODEBUILD_SRC_DIR/tools
+
+  build:
+    commands:
+      # we use BWS github admin token
+      - GITHUB_USERNAME="nachocoll"
+      - GITHUB_TOKEN=$(aws secretsmanager get-secret-value --secret-id github/tokens | jq --raw-output '.SecretString' | jq -r .GITHUB_TOKEN)
+
+      # docker in docker
+      - DOCKER_USERNAME=$(aws secretsmanager get-secret-value --secret-id docker/login | jq --raw-output '.SecretString' | jq -r .username)
+      - DOCKER_PASSWORD=$(aws secretsmanager get-secret-value --secret-id docker/login | jq --raw-output '.SecretString' | jq -r .password)
+
+      # Repository branch (=Environment) in upper case. Need for DEV, TEST, QA, PROD code constants.
+      - REPOSITORY_BRANCH_NAME_UPPER=$(echo $REPOSITORY_BRANCH_NAME | tr 'a-z' 'A-Z')
+
+      ############################
+      # Contracts on DynamoDB
+      ############################
+
+      ###########################
+      # BWS.NFT.zK
+      ###########################
+
+      # mumbai_1
+      - aws dynamodb update-item --table-name "${REPOSITORY_BRANCH_NAME}-BWS_BLOCKCHAIN_CONTRACTS" --key '{ "CONTRACT":{"S":"BWS.NFT.zK"},"NETWORK_VERSION":{"S":"mumbai_1"} }' --update-expression 'SET ADDRESS=:a' --expression-attribute-values '{":a":{"S":"0x19656CFe30Df19EA987C029c02E8917f20187A34"}}'
+
+      #######################################################################################################################
+      # Node Lambdas                                                                                                        #
+      #######################################################################################################################
+
+      # download node modules
+      - cd /$CODEBUILD_SRC_DIR/src/
+      - echo "//npm.pkg.github.com/:_authToken=$GITHUB_TOKEN" > .npmrc
+      - echo "@blockchain-web-services:https://npm.pkg.github.com/" >> .npmrc
+      - npm install --silent
+
+      #######################
+      # Node Lambdas Layer  #
+      #######################
+
+      # create layer for nodejs
+      # https://docs.aws.amazon.com/lambda/latest/dg/configuration-layers.html
+      # TODO: only create a layer version if package.json changes.
+
+      - mkdir -p /$CODEBUILD_SRC_DIR/src/node/layer/nodejs
+      - mv /$CODEBUILD_SRC_DIR/src/node_modules /$CODEBUILD_SRC_DIR/src/node/layer/nodejs
+      - cd /$CODEBUILD_SRC_DIR/src/node/layer/
+      - ls .
+      - zip -qq -r $CODEBUILD_SRC_DIR/src/node/node-layer-artifact-$CODEBUILD_BUILD_ID.zip .
+      - aws s3 cp $CODEBUILD_SRC_DIR/src/node/node-layer-artifact-$CODEBUILD_BUILD_ID.zip s3://devops-artifacts-$REPOSITORY_NAME-$REPOSITORY_BRANCH_NAME/codebuild/codeartifacts/node-layer-artifact-$CODEBUILD_BUILD_ID.zip
+      - sed -i -e "s/LAYERARTIFACT-S3KEY/node-layer-artifact-$CODEBUILD_BUILD_ID.zip/g" $CODEBUILD_SRC_DIR/.deploy/IaC/node-lambdas/node-lambdas-$REPOSITORY_BRANCH_NAME.json
+
+      #######################
+      # Node Lambdas Code   #
+      #######################
+
+      - cd /$CODEBUILD_SRC_DIR/src/
+      - zip -r $CODEBUILD_SRC_DIR/src/node/node-artifact-$CODEBUILD_BUILD_ID.zip .
+      - aws s3 cp $CODEBUILD_SRC_DIR/src/node/node-artifact-$CODEBUILD_BUILD_ID.zip s3://devops-artifacts-$REPOSITORY_NAME-$REPOSITORY_BRANCH_NAME/codebuild/codeartifacts/node-artifact-$CODEBUILD_BUILD_ID.zip
+      - sed -i -e "s/CODEARTIFACT-S3KEY/node-artifact-$CODEBUILD_BUILD_ID.zip/g" $CODEBUILD_SRC_DIR/.deploy/IaC/node-lambdas/node-lambdas-$REPOSITORY_BRANCH_NAME.json
+
+      # print variables passed to cloudformation.
+      - cat $CODEBUILD_SRC_DIR/.deploy/IaC/node-lambdas/node-lambdas-$REPOSITORY_BRANCH_NAME.json
+
+      ###################################
+      # xUNIT testing
+      ###################################
+
+      #- nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2375 --storage-driver=overlay&
+      #- timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+
+      #- sed -i -e "s/docker-reuse/local/g" $CODEBUILD_SRC_DIR/src/xUnits/docker-compose.yml
+      #- docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
+      #- docker-compose -f $CODEBUILD_SRC_DIR/src/xUnits/docker-compose.yml up -d --build
+      #- sleep 5
+
+      #- curl http://localhost:4566
+
+artifacts:
+  files:
+    - "**/*"

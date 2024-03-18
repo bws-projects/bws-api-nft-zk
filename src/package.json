@@ -1,0 +1,28 @@
+{
+  "name": "blockchainwebservices.contracts.call",
+  "version": "1.0.0",
+  "description": "",
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.49.0",
+    "@aws-sdk/client-eventbridge": "^3.306.0",
+    "@aws-sdk/client-s3": "^3.304.0",
+    "@aws-sdk/client-secrets-manager": "^3.409.0",
+    "@aws-sdk/client-sqs": "^3.303.0",
+    "@blockchain-web-services/bws-library-node-common": "^1.0.0",
+    "@blockchain-web-services/bws-library-node-data": "npm:@Blockchain-Web-Services/bws-library-node-data@^1.1.7",
+    "@pinata/sdk": "^2.1.0",
+    "aws-embedded-metrics": "^4.1.0",
+    "axios": "^1.5.0",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.7.1",
+    "node-2fa": "^2.0.3",
+    "node-fetch": "^3.3.1",
+    "random-useragent": "^0.5.0",
+    "uuid": "^9.0.0",
+    "web3": "^1.5.2"
+  }
+}

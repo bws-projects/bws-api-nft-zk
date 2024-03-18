@@ -1,0 +1,12 @@
+{
+  "Parameters": {
+    "RepositoryName": "bws-api-nft-zk",
+    "RepositoryBranchName": "staging",
+    "CodeArtifactS3Key": "CODEARTIFACT-S3KEY",
+    "LayerArtifactS3Key": "LAYERARTIFACT-S3KEY"
+  },
+  "Tags": {
+    "Stream": "BWS",
+    "ProjectCode": "bws-api-nft-zk"
+  }
+}

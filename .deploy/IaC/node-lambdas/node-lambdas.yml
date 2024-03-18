@@ -1,0 +1,458 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+
+Description: >
+  AWS CloudFormation BASE Template for deployment.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Description: The Git repo name.
+
+  RepositoryBranchName:
+    Type: String
+    Description: Environment stage (e.g. dev).
+
+  CodeArtifactS3Key:
+    Type: String
+
+  LayerArtifactS3Key:
+    Type: String
+
+Conditions:
+  IsProd: !Equals [!Ref RepositoryBranchName, prod]
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    CodeUri:
+      Bucket: !Sub "devops-artifacts-${RepositoryName}-${RepositoryBranchName}"
+      Key: !Sub "codebuild/codeartifacts/${CodeArtifactS3Key}"
+    Timeout: 120
+    Layers:
+      - !Ref NodeBaseLayer
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref RepositoryBranchName
+        TIME_OUT: 1000
+        GAS_INCREASE_NUM: 1000
+
+Resources:
+  #############################################################
+  #############################################################
+  #############################################################
+  #############################################################
+  # Events DLQ                                                #
+  #############################################################
+
+  # AWS::SQS::Queue
+  SmartContractsCallDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${RepositoryBranchName}-${RepositoryBranchName}-DLQ"
+
+  #############################################################
+  #############################################################
+  #############################################################
+  #############################################################
+  # Node Lambdas                                              #
+  #############################################################
+
+  #############################################################
+  # Node Lambda Layer                                         #
+  #############################################################
+
+  NodeBaseLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - nodejs18.x
+      Content:
+        S3Bucket: !Sub "devops-artifacts-${RepositoryName}-${RepositoryBranchName}"
+        S3Key: !Sub "codebuild/codeartifacts/${LayerArtifactS3Key}"
+      Description: My node base layer
+      LayerName: !Sub "${RepositoryName}-${RepositoryBranchName}-node-base-layer"
+      LicenseInfo: MIT
+
+  ###############################################
+  # Blockchain-Estimate                         #
+  ###############################################
+
+  # AWS::Serverless::Function
+  SmartContractEstimateHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${RepositoryBranchName}-${RepositoryName}-Blockchain-Estimate"
+      Handler: Blockchain-Estimate.handler
+      Role: !GetAtt myLambdaExecutionRole.Arn
+      Timeout: 30
+
+  ###############################################
+  # Blockchain-Call                             #
+  ###############################################
+
+  # AWS::Serverless::Function
+  SmartContractCallHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${RepositoryBranchName}-${RepositoryName}-Blockchain-Call"
+      Handler: Blockchain-Call.handler
+      Role: !GetAtt myLambdaExecutionRole.Arn
+      Timeout: 30
+
+  #############################################################
+  #############################################################
+  #############################################################
+  #############################################################
+  # StateMachines                                             #
+  #############################################################
+
+  #############################################################
+  # ESTIMATE BWS Solution                                     #
+  #############################################################
+
+  # AWS::Events::Rule
+  SmartContractEstimateHandlerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Sub "${RepositoryBranchName}-bws-api-solutions-estimate-eventbus" # The EventBus to subscribe to
+      Description: !Sub "${RepositoryBranchName} BWS.Database ESTIMATE Event Rule"
+      EventPattern:
+        source:
+          - "BWS.NFT.zK"
+        detail-type:
+          - "estimate"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt SmartContractEstimateStateMachine.Arn
+          RoleArn: !GetAtt StepFunctionsRole.Arn
+          Id: "SmartContractEstimateStateMachine"
+          RetryPolicy:
+            MaximumRetryAttempts: 5
+            MaximumEventAgeInSeconds: 86400
+
+  # AWS::StepFunctions::StateMachine
+  SmartContractEstimateStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${RepositoryName}-${RepositoryBranchName}-estimate"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      Definition:
+        StartAt: "Estimate"
+        States:
+          Estimate:
+            Type: "Task"
+            Resource: "arn:aws:states:::lambda:invoke"
+            Parameters:
+              FunctionName:
+                Ref: "SmartContractEstimateHandler"
+              Payload.$: "$"
+            ResultPath: "$.TaskResult"
+            Next: "Estimate Results"
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 5
+                MaxAttempts: 20
+                BackoffRate: 1.4
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: "Failed"
+
+          Estimate Results:
+            Type: "Choice"
+            Choices:
+              - Variable: "$.TaskResult.Payload.stateMachineStatus"
+                StringEquals: "FAILED"
+                Next: "Failed"
+
+            Default: "Succeed"
+
+          #####################################################
+          # Success/Failure
+          #####################################################
+
+          Succeed:
+            Type: "Task"
+            Resource: "arn:aws:states:::aws-sdk:sfn:sendTaskSuccess"
+            Parameters:
+              TaskToken.$: "$.detail.TaskToken"
+              Output.$: $.TaskResult
+            ResultPath: "$.TaskResult"
+            Next: "Done"
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: "Done"
+
+          Failed:
+            Type: "Task"
+            Resource: "arn:aws:states:::aws-sdk:sfn:sendTaskFailure"
+            Parameters:
+              TaskToken.$: "$.detail.TaskToken"
+              Cause.$: $.TaskResult.Payload.stateMachineStatus
+              Error.$: $.TaskResult.Payload.stateMachineStatusMessage
+            ResultPath: "$.TaskResult"
+            Next: "Done"
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: "Done"
+
+          #####################################################
+          # End
+          # ! All paths should end at Done state.
+          # !  Errors should be informed in job results.
+          #####################################################
+
+          Done:
+            Type: "Succeed"
+
+  #############################################################
+  # CALL BWS Solution                                         #
+  #############################################################
+
+  # AWS::Events::Rule
+  SmartContractCallHandlerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Sub "${RepositoryBranchName}-bws-api-solutions-call-eventbus" # The EventBus to subscribe to
+      Description: !Sub "${RepositoryBranchName} BWS.Database CALL Event Rule"
+      EventPattern:
+        source:
+          - "BWS.NFT.zK"
+        detail-type:
+          - "call"
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt SmartContractCallStateMachine.Arn
+          RoleArn: !GetAtt StepFunctionsRole.Arn
+          Id: "SmartContractCallStateMachine"
+          RetryPolicy:
+            MaximumRetryAttempts: 5
+            MaximumEventAgeInSeconds: 86400
+
+  # AWS::StepFunctions::StateMachine
+  SmartContractCallStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${RepositoryName}-${RepositoryBranchName}-call"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      Definition:
+        StartAt: "Call Solution"
+        States:
+          Call Solution:
+            Type: "Task"
+            Resource: "arn:aws:states:::lambda:invoke"
+            Parameters:
+              FunctionName:
+                Ref: "SmartContractCallHandler"
+              Payload.$: "$"
+            ResultPath: "$.TaskResult"
+            Next: "Check Finished"
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: "Failed"
+
+          Check Finished:
+            Type: "Choice"
+            Choices:
+              - Variable: "$.TaskResult.Payload.count"
+                NumericGreaterThan: 100
+                Next: "Failed"
+              - Variable: "$.TaskResult.Payload.stateMachineStatus"
+                StringEquals: "RUNNING"
+                Next: "Wait Call Solution"
+              - Variable: "$.TaskResult.Payload.stateMachineStatus"
+                StringEquals: "FINISHED"
+                Next: "Succeed"
+              - Variable: "$.TaskResult.Payload.stateMachineStatus"
+                StringEquals: "FAILED"
+                Next: "Failed"
+
+            Default: "Failed"
+
+          Wait Call Solution:
+            Type: "Wait"
+            Seconds: 5
+            Next: "Call Solution"
+
+          #####################################################
+          # Success/Failure
+          #####################################################
+
+          Succeed:
+            Type: "Task"
+            Resource: "arn:aws:states:::aws-sdk:sfn:sendTaskSuccess"
+            Parameters:
+              TaskToken.$: "$.detail.TaskToken"
+              Output.$: $.TaskResult
+            ResultPath: "$.TaskResult"
+            Next: "Done"
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: "Done"
+
+          Failed:
+            Type: "Task"
+            Resource: "arn:aws:states:::aws-sdk:sfn:sendTaskFailure"
+            Parameters:
+              TaskToken.$: "$.detail.TaskToken"
+              Cause.$: $.TaskResult.Payload.stateMachineStatus
+              Error.$: $.TaskResult.Payload.stateMachineStatusMessage
+            ResultPath: "$.TaskResult"
+            Next: "Done"
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: "Done"
+
+          #####################################################
+          # End
+          # ! All paths should end at Done state.
+          # !  Errors should be informed in job results.
+          #####################################################
+
+          Done:
+            Type: "Succeed"
+
+  ##################################################
+  # StateMachine for unexpected failures           #
+  ##################################################
+
+  # AWS::Events::Rule
+  SCCallUnexpectedFailureEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub "${RepositoryBranchName} Event Rule for unexpected errors"
+      State: "ENABLED"
+      EventPattern:
+        detail:
+          status:
+            - "FAILED"
+            - "TIMED_OUT"
+            - "ABORTED"
+          stateMachineArn:
+            [
+              !GetAtt SmartContractCallStateMachine.Arn,
+              !GetAtt SmartContractEstimateStateMachine.Arn,
+            ]
+      Targets:
+        - Arn: !GetAtt SCCallUnexpectedFailureStateMachine.Arn
+          RoleArn: !GetAtt StepFunctionsRole.Arn
+          Id: "SCCallUnexpectedFailureStateMachine"
+
+  # Set Failed status (if state machine fails)
+  SCCallUnexpectedFailureStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${RepositoryName}-${RepositoryBranchName}-unexpected-failure"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      Definition:
+        StartAt: Format Input
+        States:
+          Format Input:
+            Type: Pass
+            Parameters:
+              "Result.$": "States.StringToJson($.detail.input)"
+            ResultPath: "$.originalInput"
+            Next: Register Failure
+          Register Failure:
+            Type: "Task"
+            Resource: "arn:aws:states:::aws-sdk:sfn:sendTaskFailure"
+            Parameters:
+              TaskToken.$: "$.originalInput.Result.detail.TaskToken"
+              Cause.$: $.detail.cause
+              Error.$: $.detail.error
+            ResultPath: "$.TaskResult"
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 5
+                MaxAttempts: 5
+                BackoffRate: 1.4
+            Next: Success State
+          Success State:
+            Type: Succeed
+
+  #############################################################
+  #############################################################
+  #############################################################
+  #############################################################
+  # ROLES                                                     #
+  #############################################################
+
+  # Step Functions
+  # TODO: more restrictive role.
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${RepositoryName}-${RepositoryBranchName}-stepfunctions-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - states:StartExecution
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - sns:Publish
+                  - events:*
+                  - states:*
+                Resource: "*"
+
+  # Lambdas
+  # TODO: more restrictive role.
+  myLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "node-lambdas-${RepositoryName}-${RepositoryBranchName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - lambda:InvokeFunction
+                  - dynamodb:*
+                  - sqs:*
+                  - secretsmanager:GetSecretValue
+                  - s3:*
+                  - events:*
+                Resource: "*"

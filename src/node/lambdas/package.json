@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@blockchain-web-services/bws-library-node-data": "npm:@Blockchain-Web-Services/bws-library-node-data@^1.1.3"
+  }
+}
